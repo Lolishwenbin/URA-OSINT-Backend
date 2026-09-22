@@ -3,3 +3,5 @@ uvicorn
 pydantic
 anthropic
 httpx
+psycopg2-binary
+sqlalchemy
