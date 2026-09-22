@@ -1,187 +1,197 @@
-import sqlite3
-import json
 import os
+import json
 from datetime import datetime
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "listings.db")
+# Connection string from Neon (or fallback to local SQLite for dev)
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///listings.db"
+)
 
+# Neon sometimes gives postgres:// but SQLAlchemy needs postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+engine: Engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
 def init_db():
-    conn = get_connection()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS listings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            source_post_id TEXT UNIQUE NOT NULL,
-            post_url TEXT,
-            scraped_at TEXT,
-            posted_at TEXT,
-            raw_text TEXT,
-            raw_price_text TEXT,
-            images TEXT,
-            poster_handle TEXT,
-            language_detected TEXT,
-            raw_location_text TEXT,
-            property_type TEXT DEFAULT 'Unknown',
-            suspected_issue TEXT DEFAULT 'Unclassified',
-            advertised_duration TEXT DEFAULT 'Unknown',
-            priority TEXT DEFAULT 'Low',
-            completeness INTEGER DEFAULT 0,
-            keywords_matched TEXT,
-            notes TEXT,
-            review_status TEXT DEFAULT 'Pending',
-            reviewed_by TEXT,
-            reviewed_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS listings (
+                id SERIAL PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_post_id TEXT UNIQUE NOT NULL,
+                post_url TEXT,
+                scraped_at TEXT,
+                posted_at TEXT,
+                raw_text TEXT,
+                raw_price_text TEXT,
+                images TEXT,
+                poster_handle TEXT,
+                language_detected TEXT,
+                raw_location_text TEXT,
+                property_type TEXT DEFAULT 'Unknown',
+                suspected_issue TEXT DEFAULT 'Unclassified',
+                advertised_duration TEXT DEFAULT 'Unknown',
+                priority TEXT DEFAULT 'Low',
+                completeness INTEGER DEFAULT 0,
+                keywords_matched TEXT,
+                notes TEXT,
+                review_status TEXT DEFAULT 'Pending',
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
 
 
 def insert_listing(listing: dict) -> bool:
-    """Insert a processed listing into the database. Returns False if duplicate."""
-    conn = get_connection()
+    """Insert a processed listing. Returns False if duplicate."""
     try:
-        conn.execute("""
-            INSERT INTO listings (
-                source, source_post_id, post_url, scraped_at, posted_at,
-                raw_text, raw_price_text, images, poster_handle,
-                language_detected, raw_location_text, property_type,
-                suspected_issue, advertised_duration, priority, completeness,
-                keywords_matched, notes, review_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            listing.get("source", "carousell"),
-            listing.get("source_post_id", ""),
-            listing.get("post_url", ""),
-            listing.get("scraped_at", datetime.now().isoformat()),
-            listing.get("posted_at"),
-            listing.get("raw_text", ""),
-            listing.get("raw_price_text", ""),
-            json.dumps(listing.get("images", [])),
-            listing.get("poster_handle", ""),
-            listing.get("language_detected", "en"),
-            listing.get("raw_location_text", ""),
-            listing.get("property_type", "Unknown"),
-            listing.get("suspected_issue", "Unclassified"),
-            listing.get("advertised_duration", "Unknown"),
-            listing.get("priority", "Low"),
-            listing.get("completeness", 0),
-            json.dumps(listing.get("keywords_matched", [])),
-            listing.get("notes", ""),
-            listing.get("review_status", "Pending"),
-        ))
-        conn.commit()
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO listings (
+                    source, source_post_id, post_url, scraped_at, posted_at,
+                    raw_text, raw_price_text, images, poster_handle,
+                    language_detected, raw_location_text, property_type,
+                    suspected_issue, advertised_duration, priority, completeness,
+                    keywords_matched, notes, review_status
+                ) VALUES (
+                    :source, :source_post_id, :post_url, :scraped_at, :posted_at,
+                    :raw_text, :raw_price_text, :images, :poster_handle,
+                    :language_detected, :raw_location_text, :property_type,
+                    :suspected_issue, :advertised_duration, :priority, :completeness,
+                    :keywords_matched, :notes, :review_status
+                )
+            """), {
+                "source": listing.get("source", "carousell"),
+                "source_post_id": listing.get("source_post_id", ""),
+                "post_url": listing.get("post_url", ""),
+                "scraped_at": listing.get("scraped_at", datetime.now().isoformat()),
+                "posted_at": listing.get("posted_at"),
+                "raw_text": listing.get("raw_text", ""),
+                "raw_price_text": listing.get("raw_price_text", ""),
+                "images": json.dumps(listing.get("images", [])),
+                "poster_handle": listing.get("poster_handle", ""),
+                "language_detected": listing.get("language_detected", "en"),
+                "raw_location_text": listing.get("raw_location_text", ""),
+                "property_type": listing.get("property_type", "Unknown"),
+                "suspected_issue": listing.get("suspected_issue", "Unclassified"),
+                "advertised_duration": listing.get("advertised_duration", "Unknown"),
+                "priority": listing.get("priority", "Low"),
+                "completeness": listing.get("completeness", 0),
+                "keywords_matched": json.dumps(listing.get("keywords_matched", [])),
+                "notes": listing.get("notes", ""),
+                "review_status": listing.get("review_status", "Pending"),
+            })
         return True
-    except sqlite3.IntegrityError:
-        return False
-    finally:
-        conn.close()
+    except Exception as e:
+        # Duplicate source_post_id or other insertion error
+        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+            return False
+        raise
 
 
 def get_all_listings(filters: dict = None) -> list:
-    """Retrieve listings with optional filters."""
-    conn = get_connection()
     query = "SELECT * FROM listings WHERE 1=1"
-    params = []
+    params = {}
 
     if filters:
         if filters.get("priority"):
-            query += " AND priority = ?"
-            params.append(filters["priority"])
+            query += " AND priority = :priority"
+            params["priority"] = filters["priority"]
         if filters.get("suspected_issue"):
-            query += " AND suspected_issue LIKE ?"
-            params.append(f"%{filters['suspected_issue']}%")
+            query += " AND suspected_issue ILIKE :suspected_issue"
+            params["suspected_issue"] = f"%{filters['suspected_issue']}%"
         if filters.get("property_type"):
-            query += " AND property_type = ?"
-            params.append(filters["property_type"])
+            query += " AND property_type = :property_type"
+            params["property_type"] = filters["property_type"]
         if filters.get("review_status"):
-            query += " AND review_status = ?"
-            params.append(filters["review_status"])
+            query += " AND review_status = :review_status"
+            params["review_status"] = filters["review_status"]
         if filters.get("search"):
-            query += " AND (raw_text LIKE ? OR poster_handle LIKE ? OR raw_location_text LIKE ?)"
-            s = f"%{filters['search']}%"
-            params.extend([s, s, s])
+            query += " AND (raw_text ILIKE :s OR poster_handle ILIKE :s OR raw_location_text ILIKE :s)"
+            params["s"] = f"%{filters['search']}%"
 
     query += " ORDER BY CASE priority WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END"
 
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
+    with engine.connect() as conn:
+        rows = conn.execute(text(query), params).mappings().all()
 
     results = []
     for row in rows:
         item = dict(row)
-        item["images"] = json.loads(item.get("images", "[]"))
-        item["keywords_matched"] = json.loads(item.get("keywords_matched", "[]"))
+        item["images"] = json.loads(item.get("images") or "[]")
+        item["keywords_matched"] = json.loads(item.get("keywords_matched") or "[]")
         results.append(item)
     return results
 
 
 def get_listing_by_id(listing_id: int) -> dict:
-    conn = get_connection()
-    row = conn.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
-    conn.close()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT * FROM listings WHERE id = :id"),
+            {"id": listing_id}
+        ).mappings().first()
     if row:
         item = dict(row)
-        item["images"] = json.loads(item.get("images", "[]"))
-        item["keywords_matched"] = json.loads(item.get("keywords_matched", "[]"))
+        item["images"] = json.loads(item.get("images") or "[]")
+        item["keywords_matched"] = json.loads(item.get("keywords_matched") or "[]")
         return item
     return None
 
 
 def update_review_status(listing_id: int, status: str, reviewed_by: str = None):
-    conn = get_connection()
-    conn.execute("""
-        UPDATE listings SET review_status = ?, reviewed_by = ?, reviewed_at = ?
-        WHERE id = ?
-    """, (status, reviewed_by, datetime.now().isoformat(), listing_id))
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE listings
+            SET review_status = :status,
+                reviewed_by = :reviewed_by,
+                reviewed_at = :reviewed_at
+            WHERE id = :id
+        """), {
+            "status": status,
+            "reviewed_by": reviewed_by,
+            "reviewed_at": datetime.now().isoformat(),
+            "id": listing_id,
+        })
 
 
 def get_stats() -> dict:
-    conn = get_connection()
-    total = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
-    high = conn.execute("SELECT COUNT(*) FROM listings WHERE priority = 'High'").fetchone()[0]
-    medium = conn.execute("SELECT COUNT(*) FROM listings WHERE priority = 'Medium'").fetchone()[0]
-    low = conn.execute("SELECT COUNT(*) FROM listings WHERE priority = 'Low'").fetchone()[0]
-    short_term = conn.execute("SELECT COUNT(*) FROM listings WHERE suspected_issue LIKE '%Short-term%'").fetchone()[0]
-    dormitory = conn.execute("SELECT COUNT(*) FROM listings WHERE suspected_issue LIKE '%Dormitory%'").fetchone()[0]
-    reviewed = conn.execute("SELECT COUNT(*) FROM listings WHERE review_status != 'Pending'").fetchone()[0]
-    pending = conn.execute("SELECT COUNT(*) FROM listings WHERE review_status = 'Pending'").fetchone()[0]
-    conn.close()
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM listings")).scalar()
+        high = conn.execute(text("SELECT COUNT(*) FROM listings WHERE priority = 'High'")).scalar()
+        medium = conn.execute(text("SELECT COUNT(*) FROM listings WHERE priority = 'Medium'")).scalar()
+        low = conn.execute(text("SELECT COUNT(*) FROM listings WHERE priority = 'Low'")).scalar()
+        short_term = conn.execute(text("SELECT COUNT(*) FROM listings WHERE suspected_issue ILIKE '%Short-term%'")).scalar()
+        dormitory = conn.execute(text("SELECT COUNT(*) FROM listings WHERE suspected_issue ILIKE '%Dormitory%'")).scalar()
+        reviewed = conn.execute(text("SELECT COUNT(*) FROM listings WHERE review_status != 'Pending'")).scalar()
+        pending = conn.execute(text("SELECT COUNT(*) FROM listings WHERE review_status = 'Pending'")).scalar()
 
     return {
-        "total": total,
-        "high": high,
-        "medium": medium,
-        "low": low,
-        "short_term": short_term,
-        "dormitory": dormitory,
-        "reviewed": reviewed,
-        "pending": pending,
+        "total": total or 0,
+        "high": high or 0,
+        "medium": medium or 0,
+        "low": low or 0,
+        "short_term": short_term or 0,
+        "dormitory": dormitory or 0,
+        "reviewed": reviewed or 0,
+        "pending": pending or 0,
     }
 
 
 def delete_all():
-    conn = get_connection()
-    conn.execute("DELETE FROM listings")
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM listings"))
 
 
 def delete_by_id(listing_id: int) -> bool:
-    """Delete a single listing by ID. Returns True if deleted."""
-    conn = get_connection()
-    cursor = conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
-    conn.commit()
-    deleted = cursor.rowcount > 0
-    conn.close()
-    return deleted
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM listings WHERE id = :id"),
+            {"id": listing_id}
+        )
+        return result.rowcount > 0
